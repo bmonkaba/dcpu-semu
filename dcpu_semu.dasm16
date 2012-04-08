@@ -104,21 +104,19 @@
 	SET [0x0C+X], 0x00	;TIMER
 
 	SET X, 0x2020
-	SET [0x00+X], 0x00	;A
-	SET [0x01+X], 0x00	;B
-	SET [0x02+X], 0x00	;C
+	SET [0x00+X], 0x5A	;A
+	SET [0x01+X], 0x5A	;B
+	SET [0x02+X], 0x5A	;C
 	SET [0x03+X], 0x5A5A	;X
-	SET [0x04+X], 0x00	;Y
-	SET [0x05+X], 0x8100	;Z
-	SET [0x06+X], 0x00	;I
-	SET [0x07+X], 0x00	;J
-	SET [0x08+X], 0x00	;OVERFLOW
-	SET [0x09+X], test_pgmb	;PC
+	SET [0x04+X], 0x5A	;Y
+	SET [0x05+X], 0x8150	;Z
+	SET [0x06+X], 0x5A	;I
+	SET [0x07+X], 0x5A	;J
+	SET [0x08+X], 0x5A	;OVERFLOW
+	SET [0x09+X], test_pgma	;PC
 	SET [0x0A+X], 0x00	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
-
-	SET X, 0x2000	;start with program one
 ;
 ; initialize the point look up tables for read/execute/write cpu operations
 ;
@@ -138,7 +136,7 @@
 	;simple task switching 
 	;toggle between the two programs every virtual instruction cycle
 	XOR X, 0x0020	;toggle virtual register arrays (0x2000,0x2020)
-
+	
 	;load PC into I
 	SET I, [0x09+X] 
 	
@@ -171,7 +169,7 @@
 	AND A, 0x3F
 	SHR B, 0x0A	
 	AND B, 0x3F	;b
-	AND C, 0X0F	;4 bit instruction
+	AND C, 0x0F	;4 bit instruction
 	SET PC, decode_val
 
 :decode_val
@@ -231,11 +229,47 @@
 	ADD Z, A      ; add offset (write back type)
 	SET PC, [Z]
 
+:post_exe_skip_next
+	ADD I, 0x01		; increment the PC to
+	SET Z, [I]		; get the next instruction
+	AND Z, 0x0F 		; test for extended instruction
+	IFE Z, 0X00		; extended instructions are one word
+	SET PC, post_exe	; jump to the normal handler and continue  
+				; else, get the value types
+	SET A, [I]	 	; a
+	SET B, [I] 		; b	
+	SHR A, 0x04		; decompose (shift/mask) the instruction into a, b
+	AND A, 0x3F		; (a and b are 6 bit value types)
+	SHR B, 0x0A	
+	AND B, 0x3F	
+				; next byte value types increment the PC (from DCPU spec):
+				; 0x10-0x17: [next word + register]
+				; 0x1e: [next word]
+				; 0x1f: next word (literal)
+				; if in this range increment the PC
+	IFG 0x10, A				; test len of values	;A < 0x10 (16)
+	SET PC, post_exe_skip_next_testb	; a is embedded
+	IFG A, 0x1F							;A > 0x1F (31)
+	SET PC, post_exe_skip_next_testb	; a is embedded
+	IFG 0x18, A							;A < 18
+	ADD I, 0x01				; a is in next word
+	IFG A, 0x1D
+	ADD I, 0x01				; a is in next word
+:post_exe_skip_next_testb
+	IFG 0x10, B
+	SET PC, post_exe			; b is embedded
+	IFG B, 0x1F
+	SET PC, post_exe			; b is embedded
+	IFG 0x18, B
+	ADD I, 0x01				; b is in next word
+	IFG B, 0x1D
+	ADD I, 0x01				; b is in next word
+	;continue into post_exe
 :post_exe			; called post execution
 	ADD I, 0x01		; increment the PC
 	SET [0x09+X], I		; store the updated PC
 :post_exe_dont_update_pc	; called post execution when the PC
-				; should not be updated (ex: SET PC, 0xXX)
+				; was modifed by the opcode (JSR or SET PC)
 	ADD [0x0B+X], 1		; increment the TICK counter
 	SET PC, load_inst	; continue with the next instruction
 
@@ -295,32 +329,31 @@
 	SET PC, write_back
 
 					; branching instructions dont write back, jump to post exe
+					; instructions may be more than 1 word in length, skip
+					; next instruction for false compares.
 :_ife
 	IFE Y, J
-	SUB I, 1
-	ADD I, 1
-	SET PC, post_exe
+	SET PC, post_exe			
+	SET PC, post_exe_skip_next
 :_ifn
 	IFN Y, J
-	SUB I, 1
-	ADD I, 1
 	SET PC, post_exe
+	SET PC, post_exe_skip_next
 :_ifg
 	IFG Y, J
-	SUB I, 1
-	ADD I, 1
 	SET PC, post_exe
+	SET PC, post_exe_skip_next
 :_ifb
 	IFB Y, J
-	SUB I, 1
-	ADD I, 1
 	SET PC, post_exe
+	SET PC, post_exe_skip_next
 :_jsr
 	SET B, [0x0A+X]	;load the SP address
 	SUB B, 1	;decrement the pointer
+	ADD I, 0x01	;increment the PC (point to the next instruction)
 	SET [B], I	;write the PC to the stack
 	SET [0x0A+X],B	;store the SP
-	SET I, Y	;load a into the SP
+	SET [0x09+X], Y	;load a into the PC
 	SET PC, post_exe_dont_update_pc
 
 ;
@@ -949,316 +982,316 @@
 :gen_lookup_tables
 				;basic instructions
 	SET J, 0x6000
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _set
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _add
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _sub
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _mul
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _div
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _mod
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _shl
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _shr
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _and
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _bor
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _xor
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _ife
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _ifn
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _ifg
-	ADD J, 0X01
+	ADD J, 0x01
  	SET [J], _ifb
 				;extended instructions
 	SET J, 0x6F80
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _jsr
 
 				;value type loaders
 	SET J, 0x5000
 	;direct load
 	SET [J], _ld_a
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_b
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_c
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_x
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_y
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_z
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_i
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ld_j
 	
 				;indirect load
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_a
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_b
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_c
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_x
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_y
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_z
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_i
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lid_j
 
 				;indirect load /w word offset
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_a
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_b
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_c
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_x
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_y
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_z
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_i
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lido_j
 
 				;stack/memory loads
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lpop
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lpeek
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lpush
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lsp
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lpc
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lo
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _lidw
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _ldw
 
 				;5 bit literal loads 
 				;(all point to the same function)
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _llv
 
 				;value type write-back
 	SET J, 0x5100
 	;direct write
 	SET [J], _wd_a
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_b
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_c
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_x
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_y
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_z
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_i
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wd_j
 	
 				;indirect write
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_a
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_b
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_c
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_x
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_y
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_z
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_i
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wid_j
 
 				;indirect write /w word offset
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_a
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_b
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_c
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_x
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_y
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_z
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_i
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wido_j
 
 				;stack/memory write
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wpop
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wpeek
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wpush
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wsp
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wpc
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wo
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _widw
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wdw
 
 				;5 bit literal writes 
 				; invalid operation?? 
 				; (all point to the same NOP handler)
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
-	ADD J, 0X01
+	ADD J, 0x01
 	SET [J], _wlv
 
 				; after generating the look up tables
@@ -1275,10 +1308,12 @@
 ;
 
 
-:test_pgma
+:test_pgma		;draws a changing color pattern to the screen
+	SET Z, 0x7FFF	
+	SET X, 0x5A5A
 :conta	ADD Z, 0x01
 	SET [Z], X
-	IFE Z, 0x8100
+	IFG Z, 0x8200
 	SET PC, loopa
 	SET PC, conta
 :loopa
