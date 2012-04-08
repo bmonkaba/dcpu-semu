@@ -906,9 +906,14 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wpop
-:_wpeek
-				;NOPS ?? Not sure what the behavior should be
+	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET [Z], Y		;write 'a' to the stack
 	SET PC, post_exe
+:_wpeek
+	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET [Z], Y		;write 'a' to the stack
+	SET PC, post_exe
+
 :_wpush
 	SET Z, [0xDEAD] 	;load the stored destination pointer
 	SET [Z], Y		;write 'a' to the stack
