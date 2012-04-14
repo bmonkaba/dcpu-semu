@@ -29,18 +29,20 @@
 ; Z = temp storage
 ; I = virtual PC
 ; J = temp storage / value b / decoded value b
-; SP is not used by the emulator
+; SP = not used
 
-; virtual process register structure
+
+; virtual process register structure (len 0x1f words)
 ; (X register points to the active process)
-; X + 0x0 = A
-; X + 0x1 = B
-; X + 0x2 = C
-; X + 0x3 = X
-; X + 0x4 = Y
+; use the registers to pass up to 7 arguments to the program
+; X + 0x0 = A		arg A:	program argument A	
+; X + 0x1 = B		arg B:	program argument B
+; X + 0x2 = C		.
+; X + 0x3 = X		.
+; X + 0x4 = Y		.
 ; X + 0x5 = Z
 ; X + 0x6 = I
-; X + 0x7 = J
+; X + 0x7 = J		arg J: set to the same value as MMU (base address & screen buffer info)
 ; X + 0x8 = OVERFLOW
 ; X + 0x9 = PC
 ; X + 0xA = SP
@@ -48,19 +50,27 @@
 ; X + 0xC = TIMER (will be used for priority task switching) (TODO)
 ; X + 0xD = virtual memory address offset (virtual 0x00 -- TODO)
 ; X + 0xE = virtual memory size (TODO)
-; X + 0xF = process permissions (i/o guard) (TODO)
-; X + 0x10 = SP upper bound (TODO)
-; X + 0x11 = SP lower bound (TODO)
+; X + 0xF = memory managment unit (MMU): requires an assembler with an ORG preprocessor directive to relocate code
+;	values:
+;	 0x0000 = MMU disable 
+;	 0xXXaa = MMU access, 7 pages of 8k words (8th page is shared memory):
+;		0xXXX1 - r/w access from 0x0000 to 0x1FFF
+;		0xXXX3 - r/w access from 0x2000 to 0x3FFF
+;		0xXXX5 - r/w access from 0x4000 to 0x5FFF
+;		0xXXX7 - r/w access from 0x6000 to 0x7FFF
+;		0xXXX9 - r/w access from 0x8000 to 0x9FFF
+;		0xXXXB - r/w access from 0xA000 to 0xBFFF
+;		0xXXXD - r/w access from 0xC000 to 0xDFFF
+;
+; X + 0x10 = stack protection SP upper bound (TODO)
+; X + 0x11 = stack protection SP lower bound (TODO)
+; X + 0x12 = write back pointer (used for [next word + register] writes)
+
 
 ; memory layout
-; 0x0000 - 0x0700 	emu core
-; 0x2000 - 0x2011 	program one virtual registers
-; 0x2020 - 0x2031	program two virtual registers
-; 0x8000 - 0x8200 	terminal
-; 0xDEAD		pointer storage for indirect 
-;			loaded 'a' values, used for write backs
-; 0xFFFF		stack space for program 1
-; 0xFFFA		stack space for program 2
+; 0xF000 - 0xF700 	emu core
+; 0x3000 - 0x30A0 	VRA memory
+
 
 
 ; quick summary:
@@ -81,14 +91,208 @@
 ;
 ;	load->decode->execute->writeback->postexe
 
+;first instruction jumps to the emulator initialization
+SET PC, start_semu
+
+
 
 ;
-; initialize the virtual register arrays
+;	TEST PROGRAMS
+;
+; 	- These are the programs being emulated
+;
+;
+;
+
+	ORG 0x1000
+;
+; mmu corruption test program.
+; the program will loop through the entire address range attempting to corrupt memory.
+;
+
+
+:corrupt_mem
+	SET X, 0x2000  ;start towards the end of the writeable memory range 
+:cm_l	ADD X, 0x01
+	SET [X], 0xDEAD	;writes should only be enabled between 0x1000 - 0x2FFF
+	SET PC, cm_l
+
+
+	ORG 0x8800
+;
+; program to draw spinner to screen
+;
+
+:spin
+	SET Z, 0x8000
+	SET I, spin_text	
+:s_next	SET C, [I]	;get the text char
+	ADD I, 0x01
+        BOR C, 0xA000
+	SET [Z], C		;write the char
+	IFE [I], 0xFFFF		;check for end of text
+	SET I, spin_text
+	SET A, 0x04		;delay
+:s_dly	SUB A, 0x01
+	IFE A, 0x00
+	SET PC, s_next
+	SET PC, s_dly
+
+
+;
+; program to draw status bar
+;
+
+:bar
+	SET Z, 0x8160
+	SET I, bar_text
+
+:b_grow	SET C, [I]	;get the text char
+	ADD I, 0x01
+        BOR C, 0xEA00
+	SET [Z], C		;write the char
+	IFE [I], 0xFFFF		;check for end of text
+	SET I, bar_text
+	ADD Z, 0x01
+	IFE Z, 0x817f
+	SET PC, b_shrnk
+	SET PC, b_grow	
+
+:b_shrnk
+	AND [Z], 0xE3FF
+	SUB Z, 0x01
+	IFE Z, 0x8160
+	SET PC, b_grow
+	SET PC, b_shrnk
+
+;
+; program to write keyboard input to screen
+;
+
+:test_pgmc
+		
+:startd	SET Z, 0x801F	;clear the screen	
+	SET X, 0x0000	;set the color
+:contc	ADD Z, 0x01
+	SET [Z], X
+	IFG 0x815F, Z
+	SET PC, contc
+	SET Z, 0x8020	;reset screen pointer
+
+:waitc	SET C, [0x9000]	;get the input
+	IFE C, 0x0000	;wait for next char
+	SET PC, waitc
+
+	;IFE C, 0x0020
+	;BOR C, 0xAA00
+
+        BOR C, 0xAE00
+	SET [Z], C		;write the char (w/ cursor)
+        AND [0xFFFE+Z], 0xF0FF	;remove previous cursor
+	SET [0x9000], 0x0000	;clear the keyboard input
+	ADD Z, 0x001		;increment the screen pointer
+	IFG Z, 0x815F		;check for end of screen buffer
+	SET PC, startd
+	SET PC, waitc
+
+;
+; program to simulate keyboard input
+;
+
+:test_pgmd
+	SET I, string	;index
+	SET X, 0x9000	;destination 
+:contd	SET C, [I]	;char
+	ADD I, 0x01	;inc index
+
+	IFE C, 0xFFFF 	;check for end of string
+	SET I, string	;reset index
+	IFE C, 0xFFFF 	;check for end of string
+	SET PC, test_pgmd ;restart
+
+	SET [X], C	;insert input into keyboard buffer and
+:waitd	IFE [X], 0x00	;wait until it's taken
+	SET PC, contd	;input taken, continue
+
+	SET PC, waitd	;else wait
+
+
+
+;
+; data
+;
+
+:string DAT "O------------------------------O"
+	DAT "|  SSSS  EEEEE M    M U   U    |"
+	DAT "| S      E     MM  MM U   U    |"
+	DAT "|  SSSS  EEEE  M MM M U   U    |"
+	DAT "|      S E     M    M U   U    |"
+	DAT "|  SSSS  EEEEE M    M  UUU     |"
+	DAT "|                              |"
+	DAT "| Sandboxing Emulator for DCPU |"
+	DAT "|                         v0.2 |"
+	DAT "O------------------------------O"
+
+	DAT "O------------------------------O"
+	DAT "| Features:                    |"
+	DAT "|                              |"
+	DAT "|  1) Pre-emptive Multitasking |"
+	DAT "|  2) Memory Management Unit   |"
+	DAT "| 	3) Virtual Register Arrays  |"
+	DAT "|  4) Isolated Circular Stacks |"
+	DAT "|                              |"
+	DAT "|                              |"
+	DAT "O------------------------------O"
+	
+	DAT "O------------------------------O"
+	DAT "| Five programs are now        |"
+	DAT "| running in parallel.         |"
+	DAT "|                              |"
+	DAT "| 1) keyboard screen writer    |"
+	DAT "| 2) keyboard input simulator  |"
+	DAT "| 3) MMU (corruption) test     |"
+	DAT "| 4) spinner                   |"
+	DAT "| 5) status bar                |"
+	DAT "O------------------------------O"
+
+	;end of string delimiter
+	DAT 0xFFFF
+
+:spin_text	DAT "|/_\|/_\\",0xFFFF 
+
+:bar_text	DAT "Shields||||||||||||||||||||||||",0xFFFF 
+
+;
+;	Start of SEMU code
+;
+;
+
+ORG 0xF000
+:start_semu
+
+;
+; print splash screen
+;
+
+;:splash
+;	SET I, string	;index
+;	SET X, 0x8000	;destination 
+;:s_cont	SET C, [I]
+;	IFE C, 0xFFFF
+;	SET PC, init
+;	BOR C, 0xA200
+;	SET [X], C
+;	ADD X, 0x01
+;	ADD I, 0x01
+;	SET PC, s_cont 
+
+;
+; initialize the virtual register arrays (VRA)
 ;
 
 :init
-	;set up the virtual register arrays
-	SET X, 0x2000
+	;set up the virtual register arrays and point to the test programs
+	SET X, 0x3000
 	SET [0x00+X], 0x00	;A
 	SET [0x01+X], 0x00	;B
 	SET [0x02+X], 0x00	;C
@@ -98,12 +302,14 @@
 	SET [0x06+X], 0x00	;I
 	SET [0x07+X], 0x00	;J
 	SET [0x08+X], 0x00	;OVERFLOW
-	SET [0x09+X], test_pgmb	;PC
+	SET [0x09+X], test_pgmc	;PC
 	SET [0x0A+X], 0xFFFB	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
+	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9000)
+	SET [0x12+X], 0x00	;write back pointer
 
-	SET X, 0x2020
+	SET X, 0x3020
 	SET [0x00+X], 0x5A	;A
 	SET [0x01+X], 0x5A	;B
 	SET [0x02+X], 0x5A	;C
@@ -113,10 +319,71 @@
 	SET [0x06+X], 0x5A	;I
 	SET [0x07+X], 0x5A	;J
 	SET [0x08+X], 0x5A	;OVERFLOW
-	SET [0x09+X], test_pgma	;PC
+	SET [0x09+X], test_pgmd	;PC
 	SET [0x0A+X], 0x00	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
+	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9000)
+	SET [0x12+X], 0x00	;write back pointer
+
+	SET X, 0x3040
+	SET [0x00+X], 0x00	;A
+	SET [0x01+X], 0x00	;B
+	SET [0x02+X], 0x00	;C
+	SET [0x03+X], 0x00	;X
+	SET [0x04+X], 0x00	;Y
+	SET [0x05+X], 0x00	;Z
+	SET [0x06+X], 0x00	;I
+	SET [0x07+X], 0x00	;J
+	SET [0x08+X], 0x00	;OVERFLOW
+	SET [0x09+X], corrupt_mem	;PC
+	SET [0x0A+X], 0x00	;SP
+	SET [0x0B+X], 0x00	;TICK
+	SET [0x0C+X], 0x00	;TIMER
+	SET [0x0F+X], 0x02	;MMU (write enable range 0x1000-0x2000)
+	SET [0x12+X], 0x00	;write back pointer
+
+	SET X, 0x3060
+	SET [0x00+X], 0x00	;A
+	SET [0x01+X], 0x00	;B
+	SET [0x02+X], 0x00	;C
+	SET [0x03+X], 0x00	;X
+	SET [0x04+X], 0x00	;Y
+	SET [0x05+X], 0x00	;Z
+	SET [0x06+X], 0x00	;I
+	SET [0x07+X], 0x00	;J
+	SET [0x08+X], 0x00	;OVERFLOW
+	SET [0x09+X], spin	;PC
+	SET [0x0A+X], 0x00	;SP
+	SET [0x0B+X], 0x00	;TICK
+	SET [0x0C+X], 0x00	;TIMER
+	SET [0x0F+X], 0x00	;MMU (write enable range 0x1000-0x2000)
+	SET [0x12+X], 0x00	;write back pointer
+
+	SET X, 0x3080
+	SET [0x00+X], 0x00	;A
+	SET [0x01+X], 0x00	;B
+	SET [0x02+X], 0x00	;C
+	SET [0x03+X], 0x00	;X
+	SET [0x04+X], 0x00	;Y
+	SET [0x05+X], 0x00	;Z
+	SET [0x06+X], 0x00	;I
+	SET [0x07+X], 0x00	;J
+	SET [0x08+X], 0x00	;OVERFLOW
+	SET [0x09+X], bar	;PC
+	SET [0x0A+X], 0x00	;SP
+	SET [0x0B+X], 0x00	;TICK
+	SET [0x0C+X], 0x00	;TIMER
+	SET [0x0F+X], 0x00	;MMU (write enable range 0x1000-0x2000)
+	SET [0x12+X], 0x00	;write back pointer	
+
+
+
+
+	SET X, 0x3000		;point to the first VRA
+
+
+
 ;
 ; initialize the point look up tables for read/execute/write cpu operations
 ;
@@ -135,8 +402,10 @@
 :load_inst
 	;simple task switching 
 	;toggle between the two programs every virtual instruction cycle
-	XOR X, 0x0020	;toggle virtual register arrays (0x2000,0x2020)
-	
+	ADD X, 0x0020	;increment to the next virtual register array
+	IFE X, 0x30A0
+	SET X, 0x3000
+
 	;load PC into I
 	SET I, [0x09+X] 
 	
@@ -170,39 +439,20 @@
 	SHR B, 0x0A	
 	AND B, 0x3F	;b
 	AND C, 0x0F	;4 bit instruction
-	SET PC, decode_val
+	;SET PC, decode_val
 
 :decode_val
-	SET J, 0x00   ;clear the registers
-	SET Y, 0x00   ;which will hold the decoded values
-	SET PC, decode_val_a
-
-:decode_val_a
-	;look up and goto the read type handler
-	SET Z, 0x5000 ; decode look up table
+	SET Z, 0x5000 ; decode look up table (a values)
 	ADD Z, A      ; add the value type offset
 	SET PC, [Z]
 
 :decode_val_cont
-	;decode happens in two passes, the first pass
-	;loads a, the second b. the code below handles the
-	;decode state.
-	IFG C, 0x7FFF
-	SET PC, decode_val_done
-	SET PC, decode_val_b
-
-:decode_val_b
-	BOR C, 0x8000 ; set msb bit of C to tell
-		      ; decode_val_cont the value b
-		      ; has been loaded
-	SET Z, 0x5000 ; decode look up table
+	SET Z, 0x5500 ; decode look up table (b values)
 	ADD Z, B      ; add the value type offset
 	SET PC, [Z]   ; goto the handler
 	
 :decode_val_done
-	AND C, 0x7FFF ; clear the temp bit flag used
-		      ; durring the decode state
-	SET PC, exe_instruction
+	;SET PC, exe_instruction
 
 :exe_instruction
 	; at this point the values a & b have been loaded
@@ -211,19 +461,26 @@
 	IFG C, 0xFF	     ; check to see if the temp bit flag 
 			     ; was set indicating extended instruction
 	SET PC, exe_extended ; extended instruction
-	SET PC,	exe_basic    ; basic instruction
+	;SET PC,	exe_basic    ; basic instruction
+
+:exe_basic	      ; execute a basic instruction
+	SET Z, 0x6000 ; basic instruction look up table
+	ADD Z, C      ; add the instruction offset (op code value)
+	SET PC, [Z]   ; goto the handler
 
 :exe_extended		; execute an extended instruction
 	AND C, 0x3F	; clear the extended instruction bit flag
 	SET Z, 0x6F80	; extended instruction look up table
 	ADD Z, C	; add the instruction offset (op code value)
 	SET PC, [Z]	; goto the handler
-:exe_basic	      ; execute a basic instruction
-	SET Z, 0x6000 ; basic instruction look up table
-	ADD Z, C      ; add the instruction offset (op code value)
-	SET PC, [Z]   ; goto the handler
+
 
 :write_back
+	;check to see if MMU is used
+	IFN [0x0F+X], 0x00
+	SET PC, mmu		;MMU is enabled, jump to the MMU handler
+
+:write_back_cont
 	; goto the write back handler to store the result
 	SET Z, 0x5100 ; write back look up table
 	ADD Z, A      ; add offset (write back type)
@@ -233,7 +490,7 @@
 	ADD I, 0x01		; increment the PC to
 	SET Z, [I]		; get the next instruction
 	AND Z, 0x0F 		; test for extended instruction
-	IFE Z, 0X00		; extended instructions are one word
+	IFE Z, 0x00		; extended instructions are one word
 	SET PC, post_exe	; jump to the normal handler and continue  
 				; else, get the value types
 	SET A, [I]	 	; a
@@ -273,10 +530,80 @@
 	ADD [0x0B+X], 1		; increment the TICK counter
 	SET PC, load_inst	; continue with the next instruction
 
+:mmu
+;	memory management unit
+;	 	0xXXaa = MMU access, 7 pages of 8k words (+4k block of shared memory):
+;		0xXX01 - r/w access from 0x0000 to 0x1FFF (video buffer: 0xE000 to 0xE1FF )
+;		0xXX03 - r/w access from 0x2000 to 0x3FFF (video buffer: 0xE200 to 0xE3FF )
+;		0xXX05 - r/w access from 0x4000 to 0x5FFF (video buffer: 0xE400 to 0xE5FF )
+;		0xXX07 - r/w access from 0x6000 to 0x7FFF (video buffer: 0xE600 to 0xE7FF )
+;		0xXX09 - r/w access from 0x8000 to 0x9FFF (video buffer: 0xE800 to 0xE8FF )
+;		0xXX0B - r/w access from 0xA000 to 0xBFFF (video buffer: 0xEA00 to 0xE9FF )
+;		0xXX0D - r/w access from 0xC000 to 0xDFFF (video buffer: 0xEC00 to 0xEAFF )
+;		0xXXXX - global r/w access from 0xF000 to 0xFFFF
+
+	;evaluate value a, if destination is an address check write permisions
+	;	0x08-0x0f: [register]
+    	;	0x10-0x17: [next word + register]
+	;	0x1e: [next word]
+	IFE 0x1E, A
+	SET PC, mmu_in		;is [next word]
+
+	IFG A, 0x07
+	SET PC, mmu_r		;might be a pointer
+	SET PC, mmu_exit	;not a pointer	
+:mmu_r  IFG A, 0x0F
+	SET PC, mmu_o		;not a [register]
+	SET PC, mmu_ir		;is [register]
+
+:mmu_o	IFG A, 0x17
+	SET PC,mmu_n		;not [next word + register]
+	SET PC, mmu_io		;is [next word + register]	
+:mmu_n
+	IFG A, 0x17
+	SET PC, mmu_exit	;A>0x17, not a pointer
+
+:mmu_in ;is next word
+:mmu_io ;is offset + reg
+	SET J, [0x12+X]		;get the address
+	SET PC, mmu_cont
+
+:mmu_ir	;is register
+	SET J, A		;copy value a
+	SUB J, 0x08		;map value type to register offset
+	ADD J, X		;add to the the virtual register location
+	SET J, [J]		;get the address
+
+:mmu_cont
+	;check write permissions for destination address 
+	SET Z, [0x0F+X]		;get the mmu register 
+	SHL Z, 0x0C		;shift left three places (12 bits)
+	SET B, J		;copy the dest address into temp reg B
+	AND B, 0xF000		;mask the lower 12 bits
+	IFE B, Z		;check the second 4K
+	SET PC, mmu_exit	;write enabled
+	SUB Z, 0x1000		
+	IFE B, Z		;check the first 4K
+	SET PC, mmu_exit	;write enabled
+	SET B, 0xF000		;check shared memory
+	IFE B, Z		;
+	SET PC, mmu_exit	;write enabled
+
+
+	;out of bounds write attempt, jump to post_exe without 
+	;writing value to destination
+	SET PC, post_exe
+
+:mmu_exit
+	;write enabled continue with the write back handler
+	SET PC, write_back_cont
+
+
+
 ;
 ;instruction implementation
 ;	at this point the values a & b have been loaded
-;	into Y & J. I holds the virtual PC.
+;	into Y & J.
 
 :_set
 	SET Y, J
@@ -328,7 +655,7 @@
 	XOR Y, J
 	SET PC, write_back
 
-					; branching instructions dont write back, jump to post exe
+					; branching instructions dont write back, jump to post exe.
 					; instructions may be more than 1 word in length, skip
 					; next instruction for false compares.
 :_ife
@@ -374,466 +701,337 @@
 ; REG _A
 ;
 
-:_ld_a			;direct load register a into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_a_b
-	SET PC, _ld_a_a
 :_ld_a_a
 	SET Y, [X]
 	SET PC, decode_val_cont
 :_ld_a_b
 	SET J, [X]
-	SET PC, decode_val_cont
-
-:_lid_a			;indirect load register a into value a or b
+	SET PC, decode_val_done
+:_lid_a_a		;indirect load register into value a or b
 	SET Z, [X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_a_b
-	SET PC, _lid_a_a
-:_lid_a_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_a_b
+	SET Z, [X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_a		;indirect load (with offset) register a into value a or b
+	SET PC, decode_val_done
+:_lido_a_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
 	SET Z, [X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_a_b
-	SET PC, _lido_a_a
-:_lido_a_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_a_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
-
+	SET PC, decode_val_done
 
 ;
 ; REG B
 ;
 
-:_ld_b			;direct load register a into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_b_b
-	SET PC, _ld_b_a
 :_ld_b_a
 	SET Y, [0x01+X]
 	SET PC, decode_val_cont
 :_ld_b_b
 	SET J, [0x01+X]
-	SET PC, decode_val_cont
-
-
-:_lid_b			;indirect load register a into value a or b
+	SET PC, decode_val_done
+:_lid_b_a		;indirect load register into value a or b
 	SET Z, [0x01+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_b_b
-	SET PC, _lid_b_a
-:_lid_b_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_b_b
+	SET Z, [0x01+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_b		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_b_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
-	SET Z, [0x01+X]	;load from register
+	SET Z, [0x01+X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_b_b
-	SET PC, _lido_b_a
-:_lido_b_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_b_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x01+X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
+	SET PC, decode_val_done
 
 ;
 ; REG C
 ;
 
-:_ld_c			;direct load register into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_c_b
-	SET PC, _ld_c_a
 :_ld_c_a
 	SET Y, [0x02+X]
 	SET PC, decode_val_cont
 :_ld_c_b
 	SET J, [0x02+X]
-	SET PC, decode_val_cont
-
-
-:_lid_c			;indirect load register into value a or b
+	SET PC, decode_val_done
+:_lid_c_a		;indirect load register into value a or b
 	SET Z, [0x02+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_c_b
-	SET PC, _lid_c_a
-:_lid_c_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_c_b
+	SET Z, [0x02+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_c		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_c_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
-	SET Z, [0x02+X]	;load from register
+	SET Z, [0x02+X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_c_b
-	SET PC, _lido_c_a
-:_lido_c_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_c_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x02+X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
+	SET PC, decode_val_done
 
 
 ;
 ; REG X
 ;
 
-:_ld_x			;direct load register into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_x_b
-	SET PC, _ld_x_a
 :_ld_x_a
 	SET Y, [0x03+X]
 	SET PC, decode_val_cont
 :_ld_x_b
 	SET J, [0x03+X]
-	SET PC, decode_val_cont
-
-
-:_lid_x			;indirect load register into value a or b
+	SET PC, decode_val_done
+:_lid_x_a		;indirect load register into value a or b
 	SET Z, [0x03+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_x_b
-	SET PC, _lid_x_a
-:_lid_x_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_x_b
+	SET Z, [0x03+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_x		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_x_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
-	SET Z, [0x03+X]	;load from register
+	SET Z, [0x03+X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_x_b
-	SET PC, _lido_x_a
-:_lido_x_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_x_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x03+X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
+	SET PC, decode_val_done
 
 ;
 ; REG Y
 ;
 
-:_ld_y			;direct load register into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_y_b
-	SET PC, _ld_y_a
 :_ld_y_a
 	SET Y, [0x04+X]
 	SET PC, decode_val_cont
 :_ld_y_b
 	SET J, [0x04+X]
-	SET PC, decode_val_cont
-
-
-:_lid_y			;indirect load register into value a or b
+	SET PC, decode_val_done
+:_lid_y_a		;indirect load register into value a or b
 	SET Z, [0x04+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_y_b
-	SET PC, _lid_y_a
-:_lid_y_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_y_b
+	SET Z, [0x04+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_y		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_y_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
-	SET Z, [0x04+X]	;load from register
+	SET Z, [0x04+X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_y_b
-	SET PC, _lido_y_a
-:_lido_y_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_y_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x04+X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
+	SET PC, decode_val_done
 
 ;
 ; REG Z
 ;
 
-:_ld_z			;direct load register into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_z_b
-	SET PC, _ld_z_a
 :_ld_z_a
 	SET Y, [0x05+X]
 	SET PC, decode_val_cont
 :_ld_z_b
 	SET J, [0x05+X]
-	SET PC, decode_val_cont
-
-
-:_lid_z			;indirect load register into value a or b
+	SET PC, decode_val_done
+:_lid_z_a		;indirect load register into value a or b
 	SET Z, [0x05+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_z_b
-	SET PC, _lid_z_a
-:_lid_z_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_z_b
+	SET Z, [0x05+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_z		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_z_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
-	SET Z, [0x05+X]	;load from register
+	SET Z, [0x05+X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_z_b
-	SET PC, _lido_z_a
-:_lido_z_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_z_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x05+X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
-
+	SET PC, decode_val_done
 ;
 ; REG I
 ;
 
-:_ld_i			;direct load register into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_i_b
-	SET PC, _ld_i_a
 :_ld_i_a
 	SET Y, [0x06+X]
 	SET PC, decode_val_cont
 :_ld_i_b
 	SET J, [0x06+X]
-	SET PC, decode_val_cont
-
-
-:_lid_i			;indirect load register into value a or b
-	SET Z, [0x06+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_i_b
-	SET PC, _lid_i_a
+	SET PC, decode_val_done
 :_lid_i_a
+	SET Z, [0x06+X]	;dereference the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_i_b
+	SET Z, [0x06+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_i		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_i_a
 	ADD I, 0x01	;inc the PC
 	SET Z, [0x06+X]	;load from register 
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_i_b
-	SET PC, _lido_i_a
-:_lido_i_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_i_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x06+X]	;load from register 
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
-
+	SET PC, decode_val_done
 ;
 ; REG J
 ;
 
-:_ld_j			;direct load register into value a or b
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _ld_j_b
-	SET PC, _ld_j_a
 :_ld_j_a
 	SET Y, [0x07+X]
 	SET PC, decode_val_cont
 :_ld_j_b
 	SET J, [0x07+X]
-	SET PC, decode_val_cont
-
-
-:_lid_j			;indirect load register into value a or b
+	SET PC, decode_val_done
+:_lid_j_a		;indirect load register into value a or b
 	SET Z, [0x07+X]	;dereference the pointer
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lid_j_b
-	SET PC, _lid_j_a
-:_lid_j_a
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lid_j_b
+	SET Z, [0x07+X]	;dereference the pointer
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lido_j		;indirect load (with offset) register into value a or b
+	SET PC, decode_val_done
+:_lido_j_a		;indirect load (with offset) register into value a or b
 	ADD I, 0x01	;inc the PC
 	SET Z, [0x07+X]	;load from register a
 	ADD Z, [I]	;add the next word
-	IFG C, 0x7FFF	;if high bit set load into value b
-	SET PC, _lido_j_b
-	SET PC, _lido_j_a
-:_lido_j_a
-	SET [0xDEAD], Z ;save the pointer
+	SET [0x12+X], Z ;save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lido_j_b
+	ADD I, 0x01	;inc the PC
+	SET Z, [0x07+X]	;load from register a
+	ADD Z, [I]	;add the next word
 	SET J, [Z]
-	SET PC, decode_val_cont
-
+	SET PC, decode_val_done
 
 ;
 ;stack/memory/literal loads
 ;
 
-:_lpop				;read and pop from the stack
+:_lpop_a
 	SET Z, [0x0A+X]		; read
 	ADD [0x0A+X], 0x01	; pop (post increment the SP)
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lpop_b
-	SET PC, _lpop_a
-:_lpop_a
-	SET [0xDEAD], Z 	; save the pointer
+	SET [0x12+X], Z 	; save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lpop_b
+	SET Z, [0x0A+X]		; read
+	ADD [0x0A+X], 0x01	; pop (post increment the SP)
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lpeek				;load peek
-	SET Z, [0x0A+X]		;read stack value
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lpeek_b
-	SET PC, _lpeek_a
+	SET PC, decode_val_done
 :_lpeek_a
-	SET [0xDEAD], Z 	; save the pointer
+	SET Z, [0x0A+X]		;read stack value
+	SET [0x12+X], Z 	; save the pointer
 	SET Y, [Z]
 	SET PC, decode_val_cont
 :_lpeek_b
+	SET Z, [0x0A+X]		;read stack value
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lpush				;load push
+	SET PC, decode_val_done
+:_lpush_a
 	SUB [0x0A+X], 0x01	;push (pre decrement the SP)
 	SET Z, [0x0A+X]		;get the SP
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lpush_b
-	SET PC, _lpush_a
-:_lpush_a
-	SET [0xDEAD], Z 	;save the pointer for write back (address)
+	SET [0x12+X], Z 	;save the pointer for write back (address)
 	SET Y, [Z]		;dereference the pointer and get the value
 	SET PC, decode_val_cont
 :_lpush_b
+	SUB [0x0A+X], 0x01	;push (pre decrement the SP)
+	SET Z, [0x0A+X]		;get the SP
 	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_lsp				;load the stack pointer register
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lsp_b
-	SET PC, _lsp_a
+	SET PC, decode_val_done
 :_lsp_a
 	SET Y, [0x0A+X]
 	SET PC, decode_val_cont
 :_lsp_b
 	SET J, [0x0A+X]
-	SET PC, decode_val_cont
-
-:_lpc				;load the program counter
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lpc_b
-	SET PC, _lpc_a
+	SET PC, decode_val_done
 :_lpc_a
 	SET Y, [0x09+X]
 	SET PC, decode_val_cont
 :_lpc_b
 	SET J, [0x09+X]
-	SET PC, decode_val_cont
-
-
-:_lo				;load the overflow register
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lo_b
-	SET PC, _lo_a
+	SET PC, decode_val_done
 :_lo_a
 	SET Y, [0x08+X]
 	SET PC, decode_val_cont
 :_lo_b
 	SET J, [0x08+X]
-	SET PC, decode_val_cont
-
-
-:_lidw				;load indirect next word
+	SET PC, decode_val_done		
+:_lidw_a			;load indirect next word
 	ADD I, 0x01		;inc the PC
 	SET Z, [I]		;load the next word
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _lidw_b
-	SET PC, _lidw_a
-:_lidw_a
-	SET [0xDEAD], Z 	;save the pointer for write back (address)
+	SET [0x12+X], Z 	;save the pointer for write back (address)
 	SET Y, [Z]		;dereference the pointer and get the value
 	SET PC, decode_val_cont
 :_lidw_b
-	SET J, [Z]
-	SET PC, decode_val_cont
-
-:_ldw				;load literal next word
 	ADD I, 0x01		;inc the PC
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _ldw_b
-	SET PC, _ldw_a
-:_ldw_a
+	SET Z, [I]		;load the next word
+	SET J, [Z]
+	SET PC, decode_val_done				
+:_ldw_a				;load literal next word
+	ADD I, 0x01		;inc the PC
 	SET Y, [I]
 	SET PC, decode_val_cont
 :_ldw_b
+	ADD I, 0x01		;inc the PC
 	SET J, [I]
-	SET PC, decode_val_cont
-
-:_llv				;load literal value
-	IFG C, 0x7FFF		;if high bit set load into value b
-	SET PC, _llv_b
-	SET PC, _llv_a
-:_llv_a
+	SET PC, decode_val_done
+:_llv_a				;load literal value
 	SET Y, A
 	SUB Y, 0x20		;subtract 0x20 to get the actual literal value
 	SET PC, decode_val_cont
 :_llv_b
 	SET J, B
 	SUB J, 0x20		;subtract 0x20 to get the actual literal value
-	SET PC, decode_val_cont
+	SET PC, decode_val_done
 
 ;
 ; value writer
@@ -850,7 +1048,7 @@
 	SET PC, post_exe
 
 :_wido_a
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_b
@@ -862,7 +1060,7 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wido_b
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_c
@@ -874,7 +1072,7 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wido_c
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_x
@@ -886,7 +1084,7 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wido_x
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_y
@@ -898,7 +1096,7 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wido_y
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_z
@@ -910,7 +1108,7 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wido_z
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_i
@@ -923,7 +1121,7 @@
 	SET PC, post_exe
 
 :_wido_i
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wd_j
@@ -935,20 +1133,20 @@
 	SET [Z], Y
 	SET PC, post_exe
 :_wido_j
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wpop
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y		;write 'a' to the stack
 	SET PC, post_exe
 :_wpeek
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y		;write 'a' to the stack
 	SET PC, post_exe
 
 :_wpush
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y		;write 'a' to the stack
 	SET PC, post_exe
 :_wsp				; write SP
@@ -964,7 +1162,7 @@
 	SET PC, post_exe
 
 :_widw
-	SET Z, [0xDEAD] 	;load the stored destination pointer
+	SET Z, [0x12+X] 	;load the stored destination pointer
 	SET [Z], Y
 	SET PC, post_exe
 :_wdw				;write literal word (illegal op)
@@ -1017,143 +1215,284 @@
 	ADD J, 0x01
 	SET [J], _jsr
 
-				;value type loaders
+				;value type loaders (A)
 	SET J, 0x5000
 	;direct load
-	SET [J], _ld_a
+	SET [J], _ld_a_a
 	ADD J, 0x01
-	SET [J], _ld_b
+	SET [J], _ld_b_a
 	ADD J, 0x01
-	SET [J], _ld_c
+	SET [J], _ld_c_a
 	ADD J, 0x01
-	SET [J], _ld_x
+	SET [J], _ld_x_a
 	ADD J, 0x01
-	SET [J], _ld_y
+	SET [J], _ld_y_a
 	ADD J, 0x01
-	SET [J], _ld_z
+	SET [J], _ld_z_a
 	ADD J, 0x01
-	SET [J], _ld_i
+	SET [J], _ld_i_a
 	ADD J, 0x01
-	SET [J], _ld_j
+	SET [J], _ld_j_a
 	
 				;indirect load
 	ADD J, 0x01
-	SET [J], _lid_a
+	SET [J], _lid_a_a
 	ADD J, 0x01
-	SET [J], _lid_b
+	SET [J], _lid_b_a
 	ADD J, 0x01
-	SET [J], _lid_c
+	SET [J], _lid_c_a
 	ADD J, 0x01
-	SET [J], _lid_x
+	SET [J], _lid_x_a
 	ADD J, 0x01
-	SET [J], _lid_y
+	SET [J], _lid_y_a
 	ADD J, 0x01
-	SET [J], _lid_z
+	SET [J], _lid_z_a
 	ADD J, 0x01
-	SET [J], _lid_i
+	SET [J], _lid_i_a
 	ADD J, 0x01
-	SET [J], _lid_j
+	SET [J], _lid_j_a
 
 				;indirect load /w word offset
 	ADD J, 0x01
-	SET [J], _lido_a
+	SET [J], _lido_a_a
 	ADD J, 0x01
-	SET [J], _lido_b
+	SET [J], _lido_b_a
 	ADD J, 0x01
-	SET [J], _lido_c
+	SET [J], _lido_c_a
 	ADD J, 0x01
-	SET [J], _lido_x
+	SET [J], _lido_x_a
 	ADD J, 0x01
-	SET [J], _lido_y
+	SET [J], _lido_y_a
 	ADD J, 0x01
-	SET [J], _lido_z
+	SET [J], _lido_z_a
 	ADD J, 0x01
-	SET [J], _lido_i
+	SET [J], _lido_i_a
 	ADD J, 0x01
-	SET [J], _lido_j
+	SET [J], _lido_j_a
 
 				;stack/memory loads
 	ADD J, 0x01
-	SET [J], _lpop
+	SET [J], _lpop_a
 	ADD J, 0x01
-	SET [J], _lpeek
+	SET [J], _lpeek_a
 	ADD J, 0x01
-	SET [J], _lpush
+	SET [J], _lpush_a
 	ADD J, 0x01
-	SET [J], _lsp
+	SET [J], _lsp_a
 	ADD J, 0x01
-	SET [J], _lpc
+	SET [J], _lpc_a
 	ADD J, 0x01
-	SET [J], _lo
+	SET [J], _lo_a
 	ADD J, 0x01
-	SET [J], _lidw
+	SET [J], _lidw_a
 	ADD J, 0x01
-	SET [J], _ldw
+	SET [J], _ldw_a
 
 				;5 bit literal loads 
 				;(all point to the same function)
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
 	ADD J, 0x01
-	SET [J], _llv
+	SET [J], _llv_a
+
+
+
+				;value type loaders (B)
+	SET J, 0x5500
+	;direct load
+	SET [J], _ld_a_b
+	ADD J, 0x01
+	SET [J], _ld_b_b
+	ADD J, 0x01
+	SET [J], _ld_c_b
+	ADD J, 0x01
+	SET [J], _ld_x_b
+	ADD J, 0x01
+	SET [J], _ld_y_b
+	ADD J, 0x01
+	SET [J], _ld_z_b
+	ADD J, 0x01
+	SET [J], _ld_i_b
+	ADD J, 0x01
+	SET [J], _ld_j_b
+	
+				;indirect load
+	ADD J, 0x01
+	SET [J], _lid_a_b
+	ADD J, 0x01
+	SET [J], _lid_b_b
+	ADD J, 0x01
+	SET [J], _lid_c_b
+	ADD J, 0x01
+	SET [J], _lid_x_b
+	ADD J, 0x01
+	SET [J], _lid_y_b
+	ADD J, 0x01
+	SET [J], _lid_z_b
+	ADD J, 0x01
+	SET [J], _lid_i_b
+	ADD J, 0x01
+	SET [J], _lid_j_b
+
+				;indirect load /w word offset
+	ADD J, 0x01
+	SET [J], _lido_a_b
+	ADD J, 0x01
+	SET [J], _lido_b_b
+	ADD J, 0x01
+	SET [J], _lido_c_b
+	ADD J, 0x01
+	SET [J], _lido_x_b
+	ADD J, 0x01
+	SET [J], _lido_y_b
+	ADD J, 0x01
+	SET [J], _lido_z_b
+	ADD J, 0x01
+	SET [J], _lido_i_b
+	ADD J, 0x01
+	SET [J], _lido_j_b
+
+				;stack/memory loads
+	ADD J, 0x01
+	SET [J], _lpop_b
+	ADD J, 0x01
+	SET [J], _lpeek_b
+	ADD J, 0x01
+	SET [J], _lpush_b
+	ADD J, 0x01
+	SET [J], _lsp_b
+	ADD J, 0x01
+	SET [J], _lpc_b
+	ADD J, 0x01
+	SET [J], _lo_b
+	ADD J, 0x01
+	SET [J], _lidw_b
+	ADD J, 0x01
+	SET [J], _ldw_b
+
+				;5 bit literal loads 
+				;(all point to the same function)
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+	ADD J, 0x01
+	SET [J], _llv_b
+
 
 				;value type write-back
 	SET J, 0x5100
@@ -1299,227 +1638,4 @@
 	SET PC, begin
 	
 
-;
-;	TEST PROGRAMS
-;
-; 	- These are the programs being emulated
-;
-;
-;
-
-
-:test_pgma		;draws a changing color pattern to the screen
-	SET Z, 0x7FFF	
-	SET X, 0x5A5A
-:conta	ADD Z, 0x01
-	SET [Z], X
-	IFG Z, 0x8200
-	SET PC, loopa
-	SET PC, conta
-:loopa
-	SET Z, 0x7FFF
-	SUB X, 0x1311
-	SET PC, conta
-
-
-:test_pgmb
-	;
-	; test instructions
-	;
-
-	SET A, 0x10
-	SET B, 0x10
-	SET C, 0x10
-	SET X, 0x10
-	SET Y, 0x10
-	SET Z, 0x10
-	SET I, 0x10
-	SET J, 0x10
-
-	ADD A, 0x10
-	ADD B, 0x10
-	ADD C, 0x10
-	ADD X, 0x10
-	ADD Y, 0x10
-	ADD Z, 0x10
-	ADD I, 0x10
-	ADD J, 0x10
-
-	SUB A, 0x10
-	SUB B, 0x10
-	SUB C, 0x10
-	SUB X, 0x10
-	SUB Y, 0x10
-	SUB Z, 0x10
-	SUB I, 0x10
-	SUB J, 0x10
-
-	MUL A, 0x02
-	MUL B, 0x02
-	MUL C, 0x02
-	MUL X, 0x02
-	MUL Y, 0x02
-	MUL Z, 0x02
-	MUL I, 0x02
-	MUL J, 0x02
-
-	DIV A, 0x02
-	DIV B, 0x02
-	DIV C, 0x02
-	DIV X, 0x02
-	DIV Y, 0x02
-	DIV Z, 0x02
-	DIV I, 0x02
-	DIV J, 0x02
-
-	SHL A, 0x01
-	SHL B, 0x01
-	SHL C, 0x01
-	SHL X, 0x01
-	SHL Y, 0x01
-	SHL Z, 0x01
-	SHL I, 0x01
-	SHL J, 0x01
-
-	SHR A, 0x01
-	SHR B, 0x01
-	SHR C, 0x01
-	SHR X, 0x01
-	SHR Y, 0x01
-	SHR Z, 0x01
-	SHR I, 0x01
-	SHR J, 0x01
-
-	;
-	; test value types (READ ONLY - b)
-	;
-
-				;register literals
-	SET A, 0x1234
-	SET A, A
-	SET B, A
-	SET C, B
-	SET X, C
-	SET Y, X
-	SET Z, Y
-	SET I, Z
-	SET J, I
-
-				;register pointers
-	SET A, 0xFFFF
-	SET A, [A]
-	SET B, 0xFFFF
-	SET B, [B]
-	SET C, 0xFFFF
-	SET C, [C]
-	SET X, 0xFFFF
-	SET X, [X]
-	SET Y, 0xFFFF
-	SET Y, [Y]
-	SET Z, 0xFFFF
-	SET Z, [Z]
-	SET I, 0xFFFF
-	SET I, [I]
-	SET J, 0xFFFF
-	SET J, [J]
-
-				;offset register pointers
-	SET A, 0xFFFD
-	SET A, [0x01+A]
-	SET B, 0xFFFD
-	SET B, [0x01+B]
-	SET C, 0xFFFD
-	SET C, [0x01+C]
-	SET X, 0xFFFD
-	SET X, [0x01+X]
-	SET Y, 0xFFFD
-	SET Y, [0x01+Y]
-	SET Z, 0xFFFD
-	SET Z, [0x01+Z]
-	SET I, 0xFFFD
-	SET I, [0x01+I]
-	SET J, 0xFFFD
-	SET J, [0x01+J]
-
-				;SP
-	SET A, SP
-	SET B, SP
-	SET C, SP
-	SET X, SP
-	SET Y, SP
-	SET Z, SP
-	SET I, SP
-	SET J, SP
-
-				;PC
-	SET A, PC
-	SET B, PC
-	SET C, PC
-	SET X, PC
-	SET Y, PC
-	SET Z, PC
-	SET I, PC
-	SET J, PC
-
-				;test overflow
-	ADD A, 0xFFFF
-	ADD B, 0xFFFF
-	ADD C, 0xFFFF
-	ADD X, 0xFFFF
-	ADD Y, 0xFFFF
-	ADD Z, 0xFFFF
-	ADD I, 0xFFFF
-	ADD J, 0xFFFF
-
-				;Overflow
-	SET A, O
-	SET B, O
-	SET C, O
-	SET X, O
-	SET Y, O
-	SET Z, O
-	SET I, O
-	SET J, O
-
-				;next word literals
-	SET A, 0x1010
-	SET B, 0x1010
-	SET C, 0x1010
-	SET X, 0x1010
-	SET Y, 0x1010
-	SET Z, 0x1010
-	SET I, 0x1010
-	SET J, 0x1010
-
-				;next word pointers
-	SET A, [0x0000]
-	SET B, [0x0000]
-	SET C, [0x0000]
-	SET X, [0x0000]
-	SET Y, [0x0000]
-	SET Z, [0x0000]
-	SET I, [0x0000]
-	SET J, [0x0000]
-
-	;
-	;test stack operations
-	;
-	SET PUSH, 0xDEAD
-	SET A, PEEK
-	SET PUSH, 0xBEEF
-	SET B, PEEK
-	SET I, POP
-	SET J, POP
-
-	;
-	;test indirect write backs
-	;
-	SET A, 0x5A5A
-	SET B, 0x01
-	SET [0xFFF0], A		;literal pointer
-	SET [0xFFF0+B], A	;literal offset pointer
-	SET B, 0xFFF2
-	SET [B], A		;register pointer
-
-	SET PC, test_pgmb
 :end
