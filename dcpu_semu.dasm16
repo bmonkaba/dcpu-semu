@@ -65,13 +65,43 @@
 ; X + 0x10 = stack protection SP upper bound (TODO)
 ; X + 0x11 = stack protection SP lower bound (TODO)
 ; X + 0x12 = write back pointer (used for [next word + register] writes)
+; X + 0x1E = service call timer		current service call timer (set to delay on call, decrements to zero
+;					if greater than zero, service call will fail (return 0) - TODO
+; X + 0x1F = service call delay		emulation cycles required between service calls - TODO
+
+;
+; The emulator can provide high level services (calls functions which run outside the emulation layer)
+;
+; OS DMA Service Call (VRA assignments)		
+; A				arg A:	service call function (valid values: 0x01 - 0x0F) / return value: 0
+; B				arg B:	service call argument B / return value: 0 = fail, 1 = ok
+; C				.
+; X				.
+; Y				.
+; Z				.
+; I				.
+; J				.
+
+; to initiate a service call a program must set 0xXFFF to 0xBEEF
+;     - where X is the highest page of access (mmu value of 9 would set 0x9FFF) or in case of a disabled mmu set 0xFFFF
+; service calls always return a result in registers a & b, other registers may be used depending on the call
+; the emulator checks the address and processes any pending service commands between every emulation cycle
+; however, in order to prevent service call attacks, the frequecy in which the commands will be accepted will vary
+; any additional calls beyond the allowed frequency will automaticaly fail (limits computation expense)
+
 
 
 ; memory layout
 ; 0xF000 - 0xF700 	emu core
 ; 0x3000 - 0x30A0 	VRA memory
 
-
+;lookup tables (function pointers)
+; 0x6300 - OS service calls
+; 0x6200 - extended instructions
+; 0x6000 - basic instructions
+; 0x5500 - value b loaders
+; 0x5100 - write back functions
+; 0x5000 - value a loaders
 
 ; quick summary:
 ;
@@ -170,13 +200,20 @@ SET PC, start_semu
 ;
 
 :test_pgmc
-		
-:startd	SET Z, 0x801F	;clear the screen	
-	SET X, 0x0000	;set the color
-:contc	ADD Z, 0x01
-	SET [Z], X
-	IFG 0x815F, Z
-	SET PC, contc
+
+:loopd	
+	SET A, 0x01		;clear screen service call
+	SET B, 0x0000		;set the background color
+	SET [0x9FFF],0xBEEF 	;try the service call
+
+; replaced old emulated screen clear routine with the clear screen service call.
+;	SET Z, 0x801F	;clear the screen	
+;	SET X, 0x4400	;set the color
+;:contc	ADD Z, 0x01
+;	SET [Z], X
+;	IFG 0x815F, Z
+;	SET PC, contc
+
 	SET Z, 0x8020	;reset screen pointer
 
 :waitc	SET C, [0x9000]	;get the input
@@ -192,7 +229,7 @@ SET PC, start_semu
 	SET [0x9000], 0x0000	;clear the keyboard input
 	ADD Z, 0x001		;increment the screen pointer
 	IFG Z, 0x815F		;check for end of screen buffer
-	SET PC, startd
+	SET PC, loopd
 	SET PC, waitc
 
 ;
@@ -240,7 +277,7 @@ SET PC, start_semu
 	DAT "|  2) Memory Management Unit   |"
 	DAT "| 	3) Virtual Register Arrays  |"
 	DAT "|  4) Isolated Circular Stacks |"
-	DAT "|                              |"
+	DAT "|  5) OS service calls         |"
 	DAT "|                              |"
 	DAT "O------------------------------O"
 	
@@ -303,10 +340,10 @@ ORG 0xF000
 	SET [0x07+X], 0x00	;J
 	SET [0x08+X], 0x00	;OVERFLOW
 	SET [0x09+X], test_pgmc	;PC
-	SET [0x0A+X], 0xFFFB	;SP
+	SET [0x0A+X], 0x99FF	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
-	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9000)
+	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9FFF)
 	SET [0x12+X], 0x00	;write back pointer
 
 	SET X, 0x3020
@@ -320,10 +357,10 @@ ORG 0xF000
 	SET [0x07+X], 0x5A	;J
 	SET [0x08+X], 0x5A	;OVERFLOW
 	SET [0x09+X], test_pgmd	;PC
-	SET [0x0A+X], 0x00	;SP
+	SET [0x0A+X], 0x9CFF	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
-	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9000)
+	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9FFF)
 	SET [0x12+X], 0x00	;write back pointer
 
 	SET X, 0x3040
@@ -337,10 +374,10 @@ ORG 0xF000
 	SET [0x07+X], 0x00	;J
 	SET [0x08+X], 0x00	;OVERFLOW
 	SET [0x09+X], corrupt_mem	;PC
-	SET [0x0A+X], 0x00	;SP
+	SET [0x0A+X], 0x2FFF	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
-	SET [0x0F+X], 0x02	;MMU (write enable range 0x1000-0x2000)
+	SET [0x0F+X], 0x02	;MMU (write enable range 0x1000-0x2FFF)
 	SET [0x12+X], 0x00	;write back pointer
 
 	SET X, 0x3060
@@ -357,7 +394,7 @@ ORG 0xF000
 	SET [0x0A+X], 0x00	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
-	SET [0x0F+X], 0x00	;MMU (write enable range 0x1000-0x2000)
+	SET [0x0F+X], 0x00	;MMU (disabled)
 	SET [0x12+X], 0x00	;write back pointer
 
 	SET X, 0x3080
@@ -371,10 +408,10 @@ ORG 0xF000
 	SET [0x07+X], 0x00	;J
 	SET [0x08+X], 0x00	;OVERFLOW
 	SET [0x09+X], bar	;PC
-	SET [0x0A+X], 0x00	;SP
+	SET [0x0A+X], 0x9FFF	;SP
 	SET [0x0B+X], 0x00	;TICK
 	SET [0x0C+X], 0x00	;TIMER
-	SET [0x0F+X], 0x00	;MMU (write enable range 0x1000-0x2000)
+	SET [0x0F+X], 0x09	;MMU (write enable range 0x8000-0x9FFF)
 	SET [0x12+X], 0x00	;write back pointer	
 
 
@@ -470,7 +507,7 @@ ORG 0xF000
 
 :exe_extended		; execute an extended instruction
 	AND C, 0x3F	; clear the extended instruction bit flag
-	SET Z, 0x6F80	; extended instruction look up table
+	SET Z, 0x6200	; extended instruction look up table
 	ADD Z, C	; add the instruction offset (op code value)
 	SET PC, [Z]	; goto the handler
 
@@ -528,7 +565,30 @@ ORG 0xF000
 :post_exe_dont_update_pc	; called post execution when the PC
 				; was modifed by the opcode (JSR or SET PC)
 	ADD [0x0B+X], 1		; increment the TICK counter
+
+				;finally process any service calls
+	SET A, [0x0F+X]		;get the mmu register 
+	SHL A, 0x0C		;shift left three places (12 bits)
+	BOR A, 0x0FFF		;complete the high address
+	IFE A, 0x0FFF		;mmu is disabled, check 0xFFFF for service call request
+	SET A, 0xFFFF
+	SET B, [A]		;get the data
+	IFE B, 0xBEEF		;service call was requested, call the handler
+	SET PC, sc
+:post_sc
 	SET PC, load_inst	; continue with the next instruction
+
+
+:sc
+	SET [A], 0x0000		; clear the service call byte
+	; handle the service call
+	SET C, [X]		; get service call index from the VRA (reg A)
+	AND C, 0x0F		; mask out the upper bytes
+
+	SET Z, 0x6300		; service call look up table
+	ADD Z, C		; add offset (service call index)
+	SET PC, [Z]
+
 
 :mmu
 ;	memory management unit
@@ -1170,6 +1230,58 @@ ORG 0xF000
 	;NOP
 	SET PC, post_exe
 
+
+
+;
+; OS service functions
+;
+;
+
+:_ossf1			;OS service function one: clear the screen, 
+			;VRA reg B is screen color
+			;verify write access to screen:
+	IFE A, 0xFFFF	;	no mmu
+	SET PC, _sf1c
+	IFE A, 0x9FFF	;	8000-9FFF access
+	SET PC, _sf1c	
+	IFE A, 0x8FFF	;	7000-8FFF access
+	SET PC, _sf1c
+			;all other values: write access failed
+	SET [X], 0	;clear VRA A
+	SET [0x01+X], 0	;set VRA B (fail)		
+	SET PC, post_sc
+
+
+:_sf1c
+	SET A, 0x8000	;set a to the start of the screen buffer	
+	SET B, [0x01+X]	;get the color from VRA B 
+:_sf1l	ADD A, 0x01
+	SET [A], B
+	IFG 0x8200, A
+	SET PC, _sf1l	;loop until clear
+	SET [X], 0	;clear VRA A
+	SET [0x01+X], 1	;set VRA B (pass)
+	SET PC, post_sc
+
+
+:_ossf2			; not implemented
+:_ossf3
+:_ossf4
+:_ossf5
+:_ossf6
+:_ossf7
+:_ossf8
+:_ossf9
+:_ossfA
+:_ossfB
+:_ossfC
+:_ossfD
+:_ossfE
+:_ossfF
+	SET PC, post_sc
+
+
+
 ;
 ; look up table generation
 ;
@@ -1211,7 +1323,7 @@ ORG 0xF000
 	ADD J, 0x01
  	SET [J], _ifb
 				;extended instructions
-	SET J, 0x6F80
+	SET J, 0x6200
 	ADD J, 0x01
 	SET [J], _jsr
 
@@ -1632,7 +1744,39 @@ ORG 0xF000
 	SET [J], _wlv
 	ADD J, 0x01
 	SET [J], _wlv
-
+ 
+				; OS service functions
+	SET J, 0x6300
+	ADD J, 0x01
+	SET [J], _ossf1
+	ADD J, 0x01
+	SET [J], _ossf2
+	ADD J, 0x01
+	SET [J], _ossf3
+	ADD J, 0x01
+	SET [J], _ossf4
+	ADD J, 0x01
+	SET [J], _ossf5
+	ADD J, 0x01
+	SET [J], _ossf6
+	ADD J, 0x01
+	SET [J], _ossf7
+	ADD J, 0x01
+	SET [J], _ossf8
+	ADD J, 0x01
+	SET [J], _ossf9
+	ADD J, 0x01
+	SET [J], _ossfA
+	ADD J, 0x01
+	SET [J], _ossfB
+	ADD J, 0x01
+	SET [J], _ossfC
+	ADD J, 0x01
+	SET [J], _ossfD
+	ADD J, 0x01
+	SET [J], _ossfE
+	ADD J, 0x01
+	SET [J], _ossfF
 				; after generating the look up tables
 				; goto 'begin' to start the emulation
 	SET PC, begin
